@@ -1,5 +1,5 @@
 streamlit
-google-generativeai
+requests
 pdfminer.six
 python-docx
 docx2txt
