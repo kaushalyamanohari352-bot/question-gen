@@ -1,11 +1,11 @@
 import streamlit as st
 import os
 import requests
-import json
 import pdfminer.high_level
 import docx2txt
-from PIL import Image, ImageOps, ImageEnhance
 import pytesseract
+from PIL import Image, ImageOps, ImageEnhance
+from pdf2image import convert_from_bytes
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -15,15 +15,11 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie Pro", page_icon="🧞‍♂️", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Super OCR)", page_icon="🧿", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
     st.session_state.generated_content = ""
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "current_model" not in st.session_state:
-    st.session_state.current_model = "gemini-pro"
 
 # --- Functions ---
 def register_fonts():
@@ -35,6 +31,7 @@ def register_fonts():
             return False
     return False
 
+# --- SUPER OCR FUNCTION ---
 def extract_text_from_files(uploaded_files):
     combined_text = ""
     if not uploaded_files:
@@ -45,27 +42,45 @@ def extract_text_from_files(uploaded_files):
             ext = file.name.split('.')[-1].lower()
             text_chunk = ""
             
-            # 1. PDF Handling
+            # 1. PDF Handling (Auto-OCR)
             if ext == 'pdf':
-                text_chunk = pdfminer.high_level.extract_text(file)
-                # Check if PDF is scanned (empty text)
-                if not text_chunk or len(text_chunk.strip()) < 50:
-                    st.warning(f"⚠️ අවවාදයයි: '{file.name}' ගොනුව කියවීමට නොහැක (Scanned PDF). කරුණාකර එය පින්තූර (Images/Screenshots) ලෙස ඇතුළත් කරන්න.")
-                    return "" # Stop to prevent hallucinations
-            
-            # 2. Docx/Txt Handling
-            elif ext == 'docx':
-                text_chunk = docx2txt.process(file)
-            elif ext == 'txt':
-                text_chunk = file.read().decode('utf-8')
-            
-            # 3. Image Handling (BEST FOR GEOMETRY/SCANNED DOCS)
+                # මුලින් නිකන් කියවලා බලනවා
+                raw_text = pdfminer.high_level.extract_text(file)
+                
+                # අකුරු 50කට වඩා අඩු නම්, ඒ කියන්නේ මේක Scanned PDF එකක්
+                if not raw_text or len(raw_text.strip()) < 50:
+                    st.toast(f"📸 Converting Scanned PDF: {file.name}...", icon="🔄")
+                    file.seek(0) # Reset file pointer
+                    
+                    # PDF එක පින්තූර වලට කඩනවා
+                    images = convert_from_bytes(file.read())
+                    
+                    ocr_text = ""
+                    for i, img in enumerate(images):
+                        # Image එක පැහැදිලි කරනවා
+                        img = ImageOps.grayscale(img)
+                        img = ImageEnhance.Contrast(img).enhance(2.0)
+                        
+                        # සිංහල OCR කරනවා
+                        page_text = pytesseract.image_to_string(img, lang='sin+eng', config='--oem 3 --psm 6')
+                        ocr_text += f"\n[Page {i+1}]\n{page_text}"
+                    
+                    text_chunk = ocr_text
+                else:
+                    text_chunk = raw_text
+
+            # 2. Images
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
                 img = ImageOps.grayscale(img)
                 img = ImageEnhance.Contrast(img).enhance(2.0)
-                # Tesseract OCR for Sinhala + English
                 text_chunk = pytesseract.image_to_string(img, lang='sin+eng', config='--oem 3 --psm 6')
+            
+            # 3. Docs
+            elif ext == 'docx':
+                text_chunk = docx2txt.process(file)
+            elif ext == 'txt':
+                text_chunk = file.read().decode('utf-8')
             
             combined_text += text_chunk + "\n---\n"
             
@@ -74,24 +89,20 @@ def extract_text_from_files(uploaded_files):
             
     return combined_text
 
-# --- AUTO-DETECT GOOGLE MODEL ---
+# --- AUTO-DETECT MODEL ---
 def get_working_model(api_key):
-    # Check which model is available for this key
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
             available = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            
-            # Priority List
             if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
             if "gemini-1.5-pro" in available: return "gemini-1.5-pro"
-            if "gemini-pro" in available: return "gemini-pro"
             if available: return available[0]
     except:
         pass
-    return "gemini-pro" # Fallback
+    return "gemini-pro"
 
 # --- API CALL ---
 def call_gemini(api_key, model, prompt):
@@ -99,7 +110,7 @@ def call_gemini(api_key, model, prompt):
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4} # Low temperature for accuracy
+        "generationConfig": {"temperature": 0.4}
     }
     try:
         response = requests.post(url, headers=headers, json=data)
@@ -156,7 +167,7 @@ def create_docx(text):
     buffer.seek(0)
     return buffer
 
-# --- Sidebar ---
+# --- UI ---
 with st.sidebar:
     st.title("⚙️ Control Panel")
     if "GEMINI_API_KEY" in st.secrets:
@@ -164,59 +175,43 @@ with st.sidebar:
         st.success("API Key Loaded")
     else:
         api_key = st.text_input("Google Gemini API Key:", type="password")
-    
     st.divider()
     app_mode = st.radio("Mode:", ["Exam Paper Generator", "Document Digitizer"])
 
-# --- Main UI ---
-st.title(f"🧞‍♂️ AI Doc Genie ({app_mode})")
+st.title(f"🧿 AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("1️⃣ Instructions")
-    user_instructions = st.text_area("Instructions:", height=100, placeholder="Ex: MCQ 10ක් ඕනේ...")
+    user_instructions = st.text_area("Instructions:", height=100)
     ref_files = st.file_uploader("Reference Style", accept_multiple_files=True, key="ref")
 with col2:
     st.subheader("2️⃣ Source Content")
-    st.info("Scanned PDF නම් කරුණාකර Images ලෙස දමන්න!")
-    source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
+    source_files = st.file_uploader("Source PDF/Images", accept_multiple_files=True, key="src")
 
 if st.button("Generate", type="primary"):
     if not api_key or not source_files:
-        st.error("Please provide API Key and Source Files")
+        st.error("Missing Data")
     else:
-        with st.spinner("Processing..."):
-            # 1. Extract
+        with st.spinner("Processing (Performing OCR on PDF)..."):
             source_text = extract_text_from_files(source_files)
-            
-            # If source text is empty (scanned pdf issue), stop here
             if not source_text.strip():
-                st.error("ගොනුවේ අකුරු කියවීමට නොහැක. කරුණාකර පැහැදිලි පින්තූර (Images) භාවිතා කරන්න.")
+                st.error("Could not extract text. Try creating 'packages.txt' in GitHub.")
             else:
                 ref_text = extract_text_from_files(ref_files)
-                
-                # 2. Detect Model
                 model = get_working_model(api_key)
-                st.session_state.current_model = model
-                
-                # 3. Prompt
                 prompt = f"""
                 Role: Sri Lankan Assistant. Mode: {app_mode}
                 Instructions: {user_instructions}
-                Reference: {ref_text[:3000]}
                 Source: {source_text[:15000]}
-                Rules: Use Unicode Sinhala. Use linear math (3/5). Output FINAL DOC only.
+                Rules: Use Unicode Sinhala. Linear math.
                 """
-                
-                # 4. Generate
                 res = call_gemini(api_key, model, prompt)
                 if res.startswith("Error"): st.error(res)
                 else:
                     st.session_state.generated_content = res
-                    st.session_state.chat_history = []
                     st.rerun()
 
-# --- Output ---
 if st.session_state.generated_content:
     st.divider()
     c1, c2 = st.columns([2, 1])
@@ -225,14 +220,3 @@ if st.session_state.generated_content:
         b1, b2 = st.columns(2)
         with b1: st.download_button("PDF", create_pdf(st.session_state.generated_content), "doc.pdf", "application/pdf")
         with b2: st.download_button("Word", create_docx(st.session_state.generated_content), "doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    with c2:
-        if chat := st.chat_input("Modify..."):
-            st.session_state.chat_history.append({"role": "user", "content": chat})
-            prompt = f"Original: {st.session_state.generated_content}\nRequest: {chat}\nRewrite FULL text."
-            with st.spinner("Updating..."):
-                res = call_gemini(api_key, st.session_state.current_model, prompt)
-                st.session_state.generated_content = res
-                st.session_state.chat_history.append({"role": "assistant", "content": "Updated!"})
-                st.rerun()
-        for msg in st.session_state.chat_history:
-            st.chat_message(msg["role"]).write(msg["content"])
