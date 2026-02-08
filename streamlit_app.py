@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import requests
+import base64
 import pdfminer.high_level
 import docx2txt
 import pytesseract
@@ -15,118 +16,120 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Force OCR)", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Vision Edition)", page_icon="🔮", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
     st.session_state.generated_content = ""
 
-# --- Functions ---
-def register_fonts():
-    if os.path.exists("sinhala.ttf"):
+# --- FONTS HANDLING ---
+def register_fonts(custom_font_path=None):
+    # Use custom font if uploaded, else default sinhala.ttf
+    font_path = custom_font_path if custom_font_path else "sinhala.ttf"
+    
+    if os.path.exists(font_path):
         try:
-            pdfmetrics.registerFont(TTFont('Sinhala', 'sinhala.ttf'))
+            pdfmetrics.registerFont(TTFont('Sinhala', font_path))
             return True
         except:
             return False
     return False
 
-# --- TEXT EXTRACTION (WITH FORCE OCR) ---
-def extract_text_from_files(uploaded_files, force_ocr=False):
-    combined_text = ""
+# --- IMAGE PROCESSING ---
+def encode_image(image):
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+# --- TEXT EXTRACTION ---
+def process_files(uploaded_files, use_vision_mode=False):
+    combined_content = [] # List to store text or image data
+    
     if not uploaded_files:
-        return ""
+        return combined_content
     
     for file in uploaded_files:
         try:
             ext = file.name.split('.')[-1].lower()
-            text_chunk = ""
             
             # 1. PDF Handling
             if ext == 'pdf':
-                # IF FORCE OCR IS ON: Skip normal reading, go straight to Image conversion
-                if force_ocr:
-                    st.toast(f"Force OCR Active: Scanning {file.name} as images...", icon="📸")
+                if use_vision_mode:
+                    st.toast(f"🔮 Vision Mode: Reading {file.name} visually...", icon="👁️")
                     images = convert_from_bytes(file.read())
-                    ocr_text = ""
-                    for i, img in enumerate(images):
-                        # Image Pre-processing
-                        img = ImageOps.grayscale(img)
-                        img = ImageEnhance.Contrast(img).enhance(2.0)
-                        # Extract Sinhala + English
-                        page_text = pytesseract.image_to_string(img, lang='sin+eng', config='--oem 3 --psm 6')
-                        ocr_text += f"\n--- Page {i+1} ---\n{page_text}"
-                    text_chunk = ocr_text
-                
+                    # Limit to first 5 pages to prevent overload
+                    for img in images[:5]: 
+                        combined_content.append({"type": "image", "data": encode_image(img)})
                 else:
-                    # Normal Mode
-                    raw_text = pdfminer.high_level.extract_text(file)
-                    if not raw_text or len(raw_text.strip()) < 50:
-                        st.warning(f"⚠️ '{file.name}' හි අකුරු පැහැදිලි නැත. කරුණාකර වම් පැත්තේ ඇති 'Force OCR' බොත්තම දමා නැවත උත්සාහ කරන්න.")
-                        return ""
-                    text_chunk = raw_text
+                    # Normal Text Mode
+                    text = pdfminer.high_level.extract_text(file)
+                    if not text or len(text.strip()) < 50:
+                        st.error(f"⚠️ '{file.name}' කියවීමට නොහැක. වම් පැත්තේ 'Vision Mode' දමා නැවත උත්සාහ කරන්න.")
+                    else:
+                        combined_content.append({"type": "text", "data": text})
 
-            # 2. Images (Always OCR)
+            # 2. Images
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
-                img = ImageOps.grayscale(img)
-                img = ImageEnhance.Contrast(img).enhance(2.0)
-                text_chunk = pytesseract.image_to_string(img, lang='sin+eng', config='--oem 3 --psm 6')
+                combined_content.append({"type": "image", "data": encode_image(img)})
             
-            # 3. Docs
+            # 3. Text Docs
             elif ext == 'docx':
-                text_chunk = docx2txt.process(file)
+                text = docx2txt.process(file)
+                combined_content.append({"type": "text", "data": text})
             elif ext == 'txt':
-                text_chunk = file.read().decode('utf-8')
-            
-            combined_text += text_chunk + "\n---\n"
-            
+                text = file.read().decode('utf-8')
+                combined_content.append({"type": "text", "data": text})
+                
         except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
+            st.error(f"Error: {e}")
             
-    return combined_text
+    return combined_content
 
-# --- MODEL SELECTION ---
-def get_working_model(api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            available = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
-            if "gemini-1.5-pro" in available: return "gemini-1.5-pro"
-            if available: return available[0]
-    except:
-        pass
-    return "gemini-pro"
-
-# --- API CALL ---
-def call_gemini(api_key, model, prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+# --- GEMINI API CALL (Supports Text + Images) ---
+def call_gemini_vision(api_key, prompt, content_list):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
+    
+    # Construct Parts
+    parts = [{"text": prompt}]
+    
+    for item in content_list:
+        if item["type"] == "text":
+            parts.append({"text": item["data"]})
+        elif item["type"] == "image":
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": item["data"]
+                }
+            })
+
     data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3} # Low temp for precision
+        "contents": [{"parts": parts}],
+        "generationConfig": {"temperature": 0.4}
     }
+    
     try:
         response = requests.post(url, headers=headers, json=data)
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            return f"Error: {response.text}"
+            return f"Error: {response.status_code} - {response.text}"
     except Exception as e:
         return f"Connection Error: {e}"
 
-# --- EXPORT ---
-def create_pdf(text):
+# --- EXPORT FUNCTIONS ---
+def create_pdf(text, custom_font_path=None):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    font_loaded = register_fonts()
+    font_loaded = register_fonts(custom_font_path)
     font_name = "Sinhala" if font_loaded else "Helvetica"
+    
     c.setFont(font_name, 11)
     y = 800
     margin = 40
+    
     for paragraph in text.split('\n'):
         clean_line = paragraph.replace("*", "").strip()
         if not clean_line: continue
@@ -166,7 +169,7 @@ def create_docx(text):
 
 # --- UI ---
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.title("⚙️ Control Panel")
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("API Key Active")
@@ -177,11 +180,22 @@ with st.sidebar:
     app_mode = st.radio("Mode:", ["Exam Paper Generator", "Document Digitizer"])
     
     st.divider()
-    # 🔥 THE IMPORTANT SWITCH 🔥
-    force_ocr = st.checkbox("Force OCR (සම්පූර්ණ ස්කෑන්)", help="PDF එකේ අකුරු කියවන්නේ නැත්නම් මෙය දාන්න.")
-    st.caption("Scanned PDF සඳහා මෙය අනිවාර්යයෙන් දාන්න.")
+    # 🔥 VISION MODE SWITCH
+    use_vision = st.checkbox("🔮 Vision Mode (සංකීර්ණ PDF සඳහා)", help="PDF එකේ අකුරු කැඩෙනවා නම් මේක දාන්න.")
+    
+    st.divider()
+    # 🔥 FONT SELECTOR
+    st.subheader("🅰️ Font Settings")
+    uploaded_font = st.file_uploader("Upload Custom Font (.ttf)", type="ttf")
+    
+    custom_font_path = None
+    if uploaded_font:
+        with open("custom_font.ttf", "wb") as f:
+            f.write(uploaded_font.getbuffer())
+        custom_font_path = "custom_font.ttf"
+        st.success("Custom Font Applied!")
 
-st.title(f"👁️ AI Doc Genie ({app_mode})")
+st.title(f"🔮 AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -190,28 +204,30 @@ with col1:
     ref_files = st.file_uploader("Reference Style", accept_multiple_files=True, key="ref")
 with col2:
     st.subheader("2️⃣ Source Content")
-    source_files = st.file_uploader("Source PDF/Images", accept_multiple_files=True, key="src")
+    source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
 
 if st.button("Generate", type="primary"):
     if not api_key or not source_files:
         st.error("Missing Data")
     else:
-        with st.spinner("Processing..."):
-            # Pass the Force OCR setting
-            source_text = extract_text_from_files(source_files, force_ocr=force_ocr)
+        with st.spinner("Processing with Gemini Vision..."):
+            # Process files (convert to images if Vision Mode is ON)
+            content_list = process_files(source_files, use_vision_mode=use_vision)
             
-            if not source_text.strip():
-                st.error("කිසිවක් කියවීමට නොහැක. කරුණාකර 'Force OCR' දමා උත්සාහ කරන්න.")
+            if not content_list:
+                st.error("No valid content found.")
             else:
-                ref_text = extract_text_from_files(ref_files)
-                model = get_working_model(api_key)
+                # Add instructions to the prompt
                 prompt = f"""
-                Role: Sri Lankan Assistant. Mode: {app_mode}
-                Instructions: {user_instructions}
-                Source Content (EXTRACTED): {source_text[:20000]}
-                Rules: Use Unicode Sinhala. Linear Math.
+                Role: Sri Lankan Assistant. Mode: {app_mode}.
+                Instructions: {user_instructions}.
+                Task: Read the provided images/text carefully. Extract content and generate the output.
+                Rules: Use Unicode Sinhala. Format math linearly.
                 """
-                res = call_gemini(api_key, model, prompt)
+                
+                # Call API
+                res = call_gemini_vision(api_key, prompt, content_list)
+                
                 if res.startswith("Error"): st.error(res)
                 else:
                     st.session_state.generated_content = res
@@ -223,5 +239,5 @@ if st.session_state.generated_content:
     with c1:
         st.text_area("Preview", st.session_state.generated_content, height=600)
         b1, b2 = st.columns(2)
-        with b1: st.download_button("PDF", create_pdf(st.session_state.generated_content), "doc.pdf", "application/pdf")
+        with b1: st.download_button("PDF", create_pdf(st.session_state.generated_content, custom_font_path), "doc.pdf", "application/pdf")
         with b2: st.download_button("Word", create_docx(st.session_state.generated_content), "doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
