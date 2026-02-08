@@ -2,6 +2,6 @@ streamlit
 groq
 pdfminer.six
 python-docx
-docx2txt
 pytesseract
-pillow
+Pillow
+reportlab
