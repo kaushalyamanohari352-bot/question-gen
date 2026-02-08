@@ -16,85 +16,100 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Vision Edition)", page_icon="🔮", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Ultimate)", page_icon="🧬", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
     st.session_state.generated_content = ""
+if "current_model" not in st.session_state:
+    st.session_state.current_model = "gemini-pro"
 
-# --- FONTS HANDLING ---
-def register_fonts(custom_font_path=None):
-    # Use custom font if uploaded, else default sinhala.ttf
-    font_path = custom_font_path if custom_font_path else "sinhala.ttf"
+# --- 1. MODEL AUTO-DETECTION (FIX 404 ERROR) ---
+def get_working_model(api_key):
+    # Try to fetch available models
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            # Filter models that support generateContent
+            available = []
+            for m in data.get('models', []):
+                if 'generateContent' in m.get('supportedGenerationMethods', []):
+                    available.append(m['name'].replace('models/', ''))
+            
+            # Priority Selection
+            if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
+            if "gemini-1.5-pro" in available: return "gemini-1.5-pro"
+            if "gemini-1.0-pro" in available: return "gemini-1.0-pro"
+            if "gemini-pro" in available: return "gemini-pro"
+            
+            if available: return available[0] # Pick whatever is there
+            
+    except Exception as e:
+        print(f"Model fetch error: {e}")
     
-    if os.path.exists(font_path):
-        try:
-            pdfmetrics.registerFont(TTFont('Sinhala', font_path))
-            return True
-        except:
-            return False
-    return False
+    return "gemini-pro" # Fallback
 
-# --- IMAGE PROCESSING ---
+# --- 2. FILE PROCESSING (FIX GEOMETRY PDF) ---
 def encode_image(image):
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# --- TEXT EXTRACTION ---
-def process_files(uploaded_files, use_vision_mode=False):
-    combined_content = [] # List to store text or image data
+def process_files(uploaded_files, vision_mode=False):
+    content_parts = []
     
     if not uploaded_files:
-        return combined_content
-    
+        return content_parts
+        
     for file in uploaded_files:
         try:
             ext = file.name.split('.')[-1].lower()
             
-            # 1. PDF Handling
+            # --- PDF HANDLING ---
             if ext == 'pdf':
-                if use_vision_mode:
-                    st.toast(f"🔮 Vision Mode: Reading {file.name} visually...", icon="👁️")
-                    images = convert_from_bytes(file.read())
-                    # Limit to first 5 pages to prevent overload
-                    for img in images[:5]: 
-                        combined_content.append({"type": "image", "data": encode_image(img)})
+                if vision_mode:
+                    # GEOMETRY FIX: Convert PDF to Images
+                    st.toast(f"🖼️ Converting PDF to Images: {file.name}...", icon="🔄")
+                    try:
+                        images = convert_from_bytes(file.read())
+                        # Limit pages to avoid timeout (First 5 pages)
+                        for img in images[:10]:
+                            content_parts.append({"type": "image", "data": encode_image(img)})
+                    except Exception as e:
+                        st.error(f"Error converting PDF (Check packages.txt): {e}")
                 else:
-                    # Normal Text Mode
+                    # Text Mode
                     text = pdfminer.high_level.extract_text(file)
                     if not text or len(text.strip()) < 50:
-                        st.error(f"⚠️ '{file.name}' කියවීමට නොහැක. වම් පැත්තේ 'Vision Mode' දමා නැවත උත්සාහ කරන්න.")
+                        st.warning(f"⚠️ {file.name} හි අකුරු නැත. 'Vision Mode' දමා නැවත උත්සාහ කරන්න.")
                     else:
-                        combined_content.append({"type": "text", "data": text})
-
-            # 2. Images
+                        content_parts.append({"type": "text", "data": text})
+            
+            # --- IMAGE HANDLING ---
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
-                combined_content.append({"type": "image", "data": encode_image(img)})
+                content_parts.append({"type": "image", "data": encode_image(img)})
             
-            # 3. Text Docs
+            # --- DOCS ---
             elif ext == 'docx':
                 text = docx2txt.process(file)
-                combined_content.append({"type": "text", "data": text})
-            elif ext == 'txt':
-                text = file.read().decode('utf-8')
-                combined_content.append({"type": "text", "data": text})
+                content_parts.append({"type": "text", "data": text})
                 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error reading {file.name}: {e}")
             
-    return combined_content
+    return content_parts
 
-# --- GEMINI API CALL (Supports Text + Images) ---
-def call_gemini_vision(api_key, prompt, content_list):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+# --- 3. API CALL ---
+def call_gemini(api_key, model, prompt, content_parts):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
-    # Construct Parts
     parts = [{"text": prompt}]
     
-    for item in content_list:
+    for item in content_parts:
         if item["type"] == "text":
             parts.append({"text": item["data"]})
         elif item["type"] == "image":
@@ -104,7 +119,7 @@ def call_gemini_vision(api_key, prompt, content_list):
                     "data": item["data"]
                 }
             })
-
+            
     data = {
         "contents": [{"parts": parts}],
         "generationConfig": {"temperature": 0.4}
@@ -119,12 +134,21 @@ def call_gemini_vision(api_key, prompt, content_list):
     except Exception as e:
         return f"Connection Error: {e}"
 
-# --- EXPORT FUNCTIONS ---
-def create_pdf(text, custom_font_path=None):
+# --- 4. EXPORT (FONTS & DOWNLOADS) ---
+def register_fonts(custom_path=None):
+    path = custom_path if custom_path else "sinhala.ttf"
+    if os.path.exists(path):
+        try:
+            pdfmetrics.registerFont(TTFont('Sinhala', path))
+            return True
+        except: return False
+    return False
+
+def create_pdf(text, font_path=None):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    font_loaded = register_fonts(custom_font_path)
-    font_name = "Sinhala" if font_loaded else "Helvetica"
+    has_font = register_fonts(font_path)
+    font_name = "Sinhala" if has_font else "Helvetica"
     
     c.setFont(font_name, 11)
     y = 800
@@ -167,66 +191,75 @@ def create_docx(text):
     buffer.seek(0)
     return buffer
 
-# --- UI ---
+# --- 5. UI ---
 with st.sidebar:
-    st.title("⚙️ Control Panel")
+    st.title("⚙️ Settings")
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("API Key Active")
     else:
         api_key = st.text_input("Gemini API Key:", type="password")
-    
+        
     st.divider()
     app_mode = st.radio("Mode:", ["Exam Paper Generator", "Document Digitizer"])
     
     st.divider()
-    # 🔥 VISION MODE SWITCH
-    use_vision = st.checkbox("🔮 Vision Mode (සංකීර්ණ PDF සඳහා)", help="PDF එකේ අකුරු කැඩෙනවා නම් මේක දාන්න.")
-    
+    # RESTORED FEATURE: Vision Mode
+    vision_mode = st.checkbox("🔮 Vision / Force OCR Mode", help="Use this for Scanned PDFs or Geometry papers.")
+    if vision_mode:
+        st.caption("✅ Geometry PDF සඳහා මෙය දාන්න.")
+        
     st.divider()
-    # 🔥 FONT SELECTOR
-    st.subheader("🅰️ Font Settings")
-    uploaded_font = st.file_uploader("Upload Custom Font (.ttf)", type="ttf")
-    
+    # RESTORED FEATURE: Custom Font
+    st.subheader("🅰️ Custom Font")
+    uploaded_font = st.file_uploader("Upload .ttf", type="ttf")
     custom_font_path = None
     if uploaded_font:
-        with open("custom_font.ttf", "wb") as f:
-            f.write(uploaded_font.getbuffer())
-        custom_font_path = "custom_font.ttf"
-        st.success("Custom Font Applied!")
+        with open("custom.ttf", "wb") as f: f.write(uploaded_font.getbuffer())
+        custom_font_path = "custom.ttf"
+        st.success("Font Loaded!")
 
-st.title(f"🔮 AI Doc Genie ({app_mode})")
+st.title(f"🧬 AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("1️⃣ Instructions")
-    user_instructions = st.text_area("Instructions:", height=100)
+    user_instr = st.text_area("Instructions:", height=100)
     ref_files = st.file_uploader("Reference Style", accept_multiple_files=True, key="ref")
 with col2:
     st.subheader("2️⃣ Source Content")
-    source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
+    src_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
 
 if st.button("Generate", type="primary"):
-    if not api_key or not source_files:
-        st.error("Missing Data")
+    if not api_key or not src_files:
+        st.error("Please provide API Key and Source Files.")
     else:
-        with st.spinner("Processing with Gemini Vision..."):
-            # Process files (convert to images if Vision Mode is ON)
-            content_list = process_files(source_files, use_vision_mode=use_vision)
+        with st.spinner("Detecting AI Model & Processing..."):
+            # 1. Auto-Detect Model (Fix 404)
+            model = get_working_model(api_key)
+            st.session_state.current_model = model
+            # st.toast(f"Using Model: {model}") # Uncomment to see which model is used
+            
+            # 2. Process Files (Fix Geometry)
+            content_list = process_files(src_files, vision_mode=vision_mode)
             
             if not content_list:
-                st.error("No valid content found.")
+                st.error("No valid content found. Try turning on Vision Mode.")
             else:
-                # Add instructions to the prompt
+                # 3. Prompt Engineering (Sinhala/Math)
                 prompt = f"""
                 Role: Sri Lankan Assistant. Mode: {app_mode}.
-                Instructions: {user_instructions}.
-                Task: Read the provided images/text carefully. Extract content and generate the output.
-                Rules: Use Unicode Sinhala. Format math linearly.
+                Instructions: {user_instr}.
+                Reference Style: (User provided reference docs).
+                Task: Read the input images/text. Extract Geometry diagrams/text if present.
+                Rules:
+                1. Output ONLY the final document content.
+                2. Use Standard Unicode Sinhala.
+                3. Use Linear Math format (e.g. 3/5, x^2 + y^2 = r^2).
                 """
                 
-                # Call API
-                res = call_gemini_vision(api_key, prompt, content_list)
+                # 4. Generate
+                res = call_gemini(api_key, model, prompt, content_list)
                 
                 if res.startswith("Error"): st.error(res)
                 else:
