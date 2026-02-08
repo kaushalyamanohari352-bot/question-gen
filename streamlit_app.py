@@ -150,8 +150,8 @@ if st.button("Generate (සාදන්න)", type="primary"):
     else:
         genai.configure(api_key=api_key)
         
-        # --- FIXED MODEL NAME HERE ---
-        model = genai.GenerativeModel('gemini-pro')
+        # Using the robust 1.5 Flash model
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
         with st.spinner("Gemini is working..."):
             source_text = extract_text_from_files(source_files)
@@ -201,7 +201,7 @@ if st.session_state.generated_content:
             st.session_state.chat_history.append({"role": "user", "content": chat_msg})
             
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             
             chat_prompt = f"""
             Original Text: {st.session_state.generated_content}
