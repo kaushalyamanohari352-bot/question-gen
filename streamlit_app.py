@@ -1,6 +1,7 @@
 import streamlit as st
 import os
-import google.generativeai as genai
+import requests
+import json
 import pdfminer.high_level
 import docx2txt
 from PIL import Image, ImageOps, ImageEnhance
@@ -14,7 +15,7 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Stable)", page_icon="🧞‍♂️", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Direct)", page_icon="⚡", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
@@ -54,6 +55,31 @@ def extract_text_from_files(uploaded_files):
         except Exception as e:
             st.error(f"Error reading {file.name}: {e}")
     return combined_text
+
+# --- DIRECT GEMINI API FUNCTION (No Library) ---
+def call_gemini_direct(api_key, prompt):
+    # Using the latest Gemini 1.5 Flash via direct REST API
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            # Extract text from JSON response
+            return result['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return f"Error: {response.status_code} - {response.text}"
+            
+    except Exception as e:
+        return f"Connection Error: {str(e)}"
 
 def create_pdf(text):
     buffer = io.BytesIO()
@@ -127,7 +153,7 @@ with st.sidebar:
     app_mode = st.radio("තෝරන්න:", ["Exam Paper Generator", "Document Digitizer"])
 
 # --- Main Interface ---
-st.title(f"🧞‍♂️ AI Doc Genie ({app_mode})")
+st.title(f"⚡ AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 
@@ -141,19 +167,14 @@ with col2:
     st.subheader("2️⃣ Source Content")
     source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
 
-# --- Processing with Gemini ---
+# --- Processing (DIRECT API) ---
 if st.button("Generate (සාදන්න)", type="primary"):
     if not api_key:
         st.error("API Key is missing.")
     elif not source_files:
         st.error("Please upload Source Content.")
     else:
-        genai.configure(api_key=api_key)
-        
-        # --- FIXED: USING STABLE MODEL ---
-        model = genai.GenerativeModel('gemini-pro')
-
-        with st.spinner("Gemini is working..."):
+        with st.spinner("Connecting to Gemini (Direct Mode)..."):
             source_text = extract_text_from_files(source_files)
             ref_text = extract_text_from_files(ref_files)
             
@@ -169,13 +190,15 @@ if st.button("Generate (සාදන්න)", type="primary"):
             4. Output ONLY final text.
             """
 
-            try:
-                response = model.generate_content(prompt)
-                st.session_state.generated_content = response.text
+            # Calling our new Direct Function
+            result_text = call_gemini_direct(api_key, prompt)
+            
+            if result_text.startswith("Error") or result_text.startswith("Connection"):
+                st.error(result_text)
+            else:
+                st.session_state.generated_content = result_text
                 st.session_state.chat_history = []
                 st.rerun()
-            except Exception as e:
-                st.error(f"Gemini Error: {e}")
 
 # --- Output ---
 if st.session_state.generated_content:
@@ -200,9 +223,6 @@ if st.session_state.generated_content:
         if chat_msg := st.chat_input("වෙනස්කම් කියන්න..."):
             st.session_state.chat_history.append({"role": "user", "content": chat_msg})
             
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-pro')
-            
             chat_prompt = f"""
             Original Text: {st.session_state.generated_content}
             User Request: {chat_msg}
@@ -210,7 +230,12 @@ if st.session_state.generated_content:
             """
             
             with st.spinner("Updating..."):
-                resp = model.generate_content(chat_prompt)
-                st.session_state.generated_content = resp.text
-                st.session_state.chat_history.append({"role": "assistant", "content": "Updated!"})
-                st.rerun()
+                # Use direct call here too
+                resp_text = call_gemini_direct(api_key, chat_prompt)
+                
+                if resp_text.startswith("Error"):
+                    st.error(resp_text)
+                else:
+                    st.session_state.generated_content = resp_text
+                    st.session_state.chat_history.append({"role": "assistant", "content": "Updated!"})
+                    st.rerun()
