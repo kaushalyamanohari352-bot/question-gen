@@ -15,7 +15,7 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Super OCR)", page_icon="🧿", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Force OCR)", page_icon="👁️", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
@@ -31,8 +31,8 @@ def register_fonts():
             return False
     return False
 
-# --- SUPER OCR FUNCTION ---
-def extract_text_from_files(uploaded_files):
+# --- TEXT EXTRACTION (WITH FORCE OCR) ---
+def extract_text_from_files(uploaded_files, force_ocr=False):
     combined_text = ""
     if not uploaded_files:
         return ""
@@ -42,34 +42,31 @@ def extract_text_from_files(uploaded_files):
             ext = file.name.split('.')[-1].lower()
             text_chunk = ""
             
-            # 1. PDF Handling (Auto-OCR)
+            # 1. PDF Handling
             if ext == 'pdf':
-                # මුලින් නිකන් කියවලා බලනවා
-                raw_text = pdfminer.high_level.extract_text(file)
-                
-                # අකුරු 50කට වඩා අඩු නම්, ඒ කියන්නේ මේක Scanned PDF එකක්
-                if not raw_text or len(raw_text.strip()) < 50:
-                    st.toast(f"📸 Converting Scanned PDF: {file.name}...", icon="🔄")
-                    file.seek(0) # Reset file pointer
-                    
-                    # PDF එක පින්තූර වලට කඩනවා
+                # IF FORCE OCR IS ON: Skip normal reading, go straight to Image conversion
+                if force_ocr:
+                    st.toast(f"Force OCR Active: Scanning {file.name} as images...", icon="📸")
                     images = convert_from_bytes(file.read())
-                    
                     ocr_text = ""
                     for i, img in enumerate(images):
-                        # Image එක පැහැදිලි කරනවා
+                        # Image Pre-processing
                         img = ImageOps.grayscale(img)
                         img = ImageEnhance.Contrast(img).enhance(2.0)
-                        
-                        # සිංහල OCR කරනවා
+                        # Extract Sinhala + English
                         page_text = pytesseract.image_to_string(img, lang='sin+eng', config='--oem 3 --psm 6')
-                        ocr_text += f"\n[Page {i+1}]\n{page_text}"
-                    
+                        ocr_text += f"\n--- Page {i+1} ---\n{page_text}"
                     text_chunk = ocr_text
+                
                 else:
+                    # Normal Mode
+                    raw_text = pdfminer.high_level.extract_text(file)
+                    if not raw_text or len(raw_text.strip()) < 50:
+                        st.warning(f"⚠️ '{file.name}' හි අකුරු පැහැදිලි නැත. කරුණාකර වම් පැත්තේ ඇති 'Force OCR' බොත්තම දමා නැවත උත්සාහ කරන්න.")
+                        return ""
                     text_chunk = raw_text
 
-            # 2. Images
+            # 2. Images (Always OCR)
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
                 img = ImageOps.grayscale(img)
@@ -89,7 +86,7 @@ def extract_text_from_files(uploaded_files):
             
     return combined_text
 
-# --- AUTO-DETECT MODEL ---
+# --- MODEL SELECTION ---
 def get_working_model(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
@@ -110,7 +107,7 @@ def call_gemini(api_key, model, prompt):
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4}
+        "generationConfig": {"temperature": 0.3} # Low temp for precision
     }
     try:
         response = requests.post(url, headers=headers, json=data)
@@ -121,6 +118,7 @@ def call_gemini(api_key, model, prompt):
     except Exception as e:
         return f"Connection Error: {e}"
 
+# --- EXPORT ---
 def create_pdf(text):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -138,8 +136,7 @@ def create_pdf(text):
             if c.stringWidth(line + " " + word, font_name) < 500:
                 line += " " + word
             else:
-                c.drawString(margin, y, line)
-                y -= 20
+                c.drawString(margin, y, line); y -= 20
                 line = word
                 if y < 50: c.showPage(); c.setFont(font_name, 11); y = 800
         c.drawString(margin, y, line); y -= 20
@@ -169,16 +166,22 @@ def create_docx(text):
 
 # --- UI ---
 with st.sidebar:
-    st.title("⚙️ Control Panel")
+    st.title("⚙️ Settings")
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("API Key Loaded")
+        st.success("API Key Active")
     else:
-        api_key = st.text_input("Google Gemini API Key:", type="password")
+        api_key = st.text_input("Gemini API Key:", type="password")
+    
     st.divider()
     app_mode = st.radio("Mode:", ["Exam Paper Generator", "Document Digitizer"])
+    
+    st.divider()
+    # 🔥 THE IMPORTANT SWITCH 🔥
+    force_ocr = st.checkbox("Force OCR (සම්පූර්ණ ස්කෑන්)", help="PDF එකේ අකුරු කියවන්නේ නැත්නම් මෙය දාන්න.")
+    st.caption("Scanned PDF සඳහා මෙය අනිවාර්යයෙන් දාන්න.")
 
-st.title(f"🧿 AI Doc Genie ({app_mode})")
+st.title(f"👁️ AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -193,18 +196,20 @@ if st.button("Generate", type="primary"):
     if not api_key or not source_files:
         st.error("Missing Data")
     else:
-        with st.spinner("Processing (Performing OCR on PDF)..."):
-            source_text = extract_text_from_files(source_files)
+        with st.spinner("Processing..."):
+            # Pass the Force OCR setting
+            source_text = extract_text_from_files(source_files, force_ocr=force_ocr)
+            
             if not source_text.strip():
-                st.error("Could not extract text. Try creating 'packages.txt' in GitHub.")
+                st.error("කිසිවක් කියවීමට නොහැක. කරුණාකර 'Force OCR' දමා උත්සාහ කරන්න.")
             else:
                 ref_text = extract_text_from_files(ref_files)
                 model = get_working_model(api_key)
                 prompt = f"""
                 Role: Sri Lankan Assistant. Mode: {app_mode}
                 Instructions: {user_instructions}
-                Source: {source_text[:15000]}
-                Rules: Use Unicode Sinhala. Linear math.
+                Source Content (EXTRACTED): {source_text[:20000]}
+                Rules: Use Unicode Sinhala. Linear Math.
                 """
                 res = call_gemini(api_key, model, prompt)
                 if res.startswith("Error"): st.error(res)
