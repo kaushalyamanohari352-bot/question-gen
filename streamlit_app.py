@@ -101,7 +101,6 @@ def create_docx(text):
         line = line.strip()
         if not line: continue
         p = doc.add_paragraph()
-        # The error happened here previously due to a copy-paste issue
         if line.startswith("#") or "Paper" in line or "Part" in line:
             run = p.add_run(line.replace("#", "").strip())
             run.bold = True
@@ -118,7 +117,6 @@ def create_docx(text):
 with st.sidebar:
     st.title("⚙️ Control Panel")
     
-    # GEMINI API KEY CHECK
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("Gemini Key Connected")
@@ -146,37 +144,29 @@ with col2:
 # --- Processing with Gemini ---
 if st.button("Generate (සාදන්න)", type="primary"):
     if not api_key:
-        st.error("API Key is missing. Please enter it in the sidebar.")
+        st.error("API Key is missing.")
     elif not source_files:
         st.error("Please upload Source Content.")
     else:
-        # Configure Gemini
         genai.configure(api_key=api_key)
         
-        # Use Gemini 1.5 Flash (Fast & High Limits)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # --- FIXED MODEL NAME HERE ---
+        model = genai.GenerativeModel('gemini-pro')
 
         with st.spinner("Gemini is working..."):
             source_text = extract_text_from_files(source_files)
             ref_text = extract_text_from_files(ref_files)
             
             prompt = f"""
-            Role: Sri Lankan Assistant.
-            Mode: {app_mode}
-            
+            Role: Sri Lankan Assistant. Mode: {app_mode}
             User Instructions: {user_instructions}
-            
-            Reference Style (Format only): 
-            {ref_text[:5000]}
-            
-            Source Content (Data): 
-            {source_text[:15000]}
-            
+            Reference Style: {ref_text[:5000]}
+            Source Content: {source_text[:15000]}
             Requirements:
             1. Use Standard Unicode Sinhala.
-            2. If Exam: Use linear math format (e.g. 3/5, x^2) for Word compatibility.
-            3. If Digitizer: Fix grammar/spelling.
-            4. Output ONLY the final document text.
+            2. If Exam: Use linear math format (e.g. 3/5, x^2).
+            3. If Digitizer: Fix grammar.
+            4. Output ONLY final text.
             """
 
             try:
@@ -210,14 +200,13 @@ if st.session_state.generated_content:
         if chat_msg := st.chat_input("වෙනස්කම් කියන්න..."):
             st.session_state.chat_history.append({"role": "user", "content": chat_msg})
             
-            # Chat with History
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-pro')
             
             chat_prompt = f"""
             Original Text: {st.session_state.generated_content}
             User Request: {chat_msg}
-            Task: Rewrite the text with the changes. Output FULL text.
+            Task: Rewrite FULL text with changes.
             """
             
             with st.spinner("Updating..."):
