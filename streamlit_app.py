@@ -101,4 +101,127 @@ def create_docx(text):
         line = line.strip()
         if not line: continue
         p = doc.add_paragraph()
-        if line.startswith("#") or "
+        # The error happened here previously due to a copy-paste issue
+        if line.startswith("#") or "Paper" in line or "Part" in line:
+            run = p.add_run(line.replace("#", "").strip())
+            run.bold = True
+            run.font.size = Pt(13)
+        else:
+            p.add_run(line)
+    
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# --- Sidebar ---
+with st.sidebar:
+    st.title("⚙️ Control Panel")
+    
+    # GEMINI API KEY CHECK
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("Gemini Key Connected")
+    else:
+        api_key = st.text_input("Google Gemini API Key:", type="password")
+
+    st.divider()
+    app_mode = st.radio("තෝරන්න:", ["Exam Paper Generator", "Document Digitizer"])
+
+# --- Main Interface ---
+st.title(f"🧞‍♂️ AI Doc Genie ({app_mode})")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("1️⃣ Instructions")
+    ph = "MCQ 10ක් ඕනේ..." if "Exam" in app_mode else "ලිපියක් Type කරන්න..."
+    user_instructions = st.text_area("Instructions:", placeholder=ph, height=100)
+    ref_files = st.file_uploader("Reference Style", accept_multiple_files=True, key="ref")
+
+with col2:
+    st.subheader("2️⃣ Source Content")
+    source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
+
+# --- Processing with Gemini ---
+if st.button("Generate (සාදන්න)", type="primary"):
+    if not api_key:
+        st.error("API Key is missing. Please enter it in the sidebar.")
+    elif not source_files:
+        st.error("Please upload Source Content.")
+    else:
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+        
+        # Use Gemini 1.5 Flash (Fast & High Limits)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        with st.spinner("Gemini is working..."):
+            source_text = extract_text_from_files(source_files)
+            ref_text = extract_text_from_files(ref_files)
+            
+            prompt = f"""
+            Role: Sri Lankan Assistant.
+            Mode: {app_mode}
+            
+            User Instructions: {user_instructions}
+            
+            Reference Style (Format only): 
+            {ref_text[:5000]}
+            
+            Source Content (Data): 
+            {source_text[:15000]}
+            
+            Requirements:
+            1. Use Standard Unicode Sinhala.
+            2. If Exam: Use linear math format (e.g. 3/5, x^2) for Word compatibility.
+            3. If Digitizer: Fix grammar/spelling.
+            4. Output ONLY the final document text.
+            """
+
+            try:
+                response = model.generate_content(prompt)
+                st.session_state.generated_content = response.text
+                st.session_state.chat_history = []
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gemini Error: {e}")
+
+# --- Output ---
+if st.session_state.generated_content:
+    st.divider()
+    c1, c2 = st.columns([2, 1])
+    
+    with c1:
+        st.subheader("📄 Preview")
+        st.text_area("", value=st.session_state.generated_content, height=600)
+        b1, b2 = st.columns(2)
+        with b1:
+            st.download_button("Download PDF", create_pdf(st.session_state.generated_content), "doc.pdf", "application/pdf")
+        with b2:
+            st.download_button("Download Word", create_docx(st.session_state.generated_content), "doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    with c2:
+        st.subheader("💬 Chat (Modify)")
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+                
+        if chat_msg := st.chat_input("වෙනස්කම් කියන්න..."):
+            st.session_state.chat_history.append({"role": "user", "content": chat_msg})
+            
+            # Chat with History
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            chat_prompt = f"""
+            Original Text: {st.session_state.generated_content}
+            User Request: {chat_msg}
+            Task: Rewrite the text with the changes. Output FULL text.
+            """
+            
+            with st.spinner("Updating..."):
+                resp = model.generate_content(chat_prompt)
+                st.session_state.generated_content = resp.text
+                st.session_state.chat_history.append({"role": "assistant", "content": "Updated!"})
+                st.rerun()
