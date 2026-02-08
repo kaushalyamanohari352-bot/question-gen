@@ -15,7 +15,7 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Direct)", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="AI Doc Genie (Auto-Fix)", page_icon="🛡️", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
@@ -56,30 +56,43 @@ def extract_text_from_files(uploaded_files):
             st.error(f"Error reading {file.name}: {e}")
     return combined_text
 
-# --- DIRECT GEMINI API FUNCTION (No Library) ---
+# --- SMART GEMINI CALL (Tries multiple models) ---
 def call_gemini_direct(api_key, prompt):
-    # Using the latest Gemini 1.5 Flash via direct REST API
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # List of models to try in order
+    models_to_try = ["gemini-1.5-flash", "gemini-pro", "gemini-1.0-pro-latest"]
     
     headers = {'Content-Type': 'application/json'}
     data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.5,  # Prevents looping text
+            "maxOutputTokens": 4096
+        }
     }
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        
-        if response.status_code == 200:
-            result = response.json()
-            # Extract text from JSON response
-            return result['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"Error: {response.status_code} - {response.text}"
+
+    last_error = ""
+
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            # Try connecting
+            response = requests.post(url, headers=headers, json=data)
             
-    except Exception as e:
-        return f"Connection Error: {str(e)}"
+            if response.status_code == 200:
+                result = response.json()
+                # Success! Return text
+                return result['candidates'][0]['content']['parts'][0]['text']
+            elif response.status_code == 404:
+                # If 404, just continue to the next model
+                last_error = f"Model {model} not found. Switching..."
+                continue 
+            else:
+                return f"Error ({model}): {response.status_code} - {response.text}"
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    return f"All models failed. Last error: {last_error}"
 
 def create_pdf(text):
     buffer = io.BytesIO()
@@ -153,7 +166,7 @@ with st.sidebar:
     app_mode = st.radio("තෝරන්න:", ["Exam Paper Generator", "Document Digitizer"])
 
 # --- Main Interface ---
-st.title(f"⚡ AI Doc Genie ({app_mode})")
+st.title(f"🛡️ AI Doc Genie ({app_mode})")
 
 col1, col2 = st.columns(2)
 
@@ -167,14 +180,14 @@ with col2:
     st.subheader("2️⃣ Source Content")
     source_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
 
-# --- Processing (DIRECT API) ---
+# --- Processing (AUTO-FIX API) ---
 if st.button("Generate (සාදන්න)", type="primary"):
     if not api_key:
         st.error("API Key is missing.")
     elif not source_files:
         st.error("Please upload Source Content.")
     else:
-        with st.spinner("Connecting to Gemini (Direct Mode)..."):
+        with st.spinner("Connecting to AI (Trying best model)..."):
             source_text = extract_text_from_files(source_files)
             ref_text = extract_text_from_files(ref_files)
             
@@ -190,10 +203,10 @@ if st.button("Generate (සාදන්න)", type="primary"):
             4. Output ONLY final text.
             """
 
-            # Calling our new Direct Function
+            # Calling smart function
             result_text = call_gemini_direct(api_key, prompt)
             
-            if result_text.startswith("Error") or result_text.startswith("Connection"):
+            if result_text.startswith("Error") or result_text.startswith("All models failed"):
                 st.error(result_text)
             else:
                 st.session_state.generated_content = result_text
@@ -230,7 +243,6 @@ if st.session_state.generated_content:
             """
             
             with st.spinner("Updating..."):
-                # Use direct call here too
                 resp_text = call_gemini_direct(api_key, chat_prompt)
                 
                 if resp_text.startswith("Error"):
