@@ -16,7 +16,7 @@ from docx import Document
 from docx.shared import Pt
 
 # --- Page Config ---
-st.set_page_config(page_title="AI Doc Genie (Ultimate)", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Exam Paper Biz Pro", page_icon="🎓", layout="wide")
 
 # --- Session State ---
 if "generated_content" not in st.session_state:
@@ -24,40 +24,34 @@ if "generated_content" not in st.session_state:
 if "current_model" not in st.session_state:
     st.session_state.current_model = "gemini-pro"
 
-# --- 1. MODEL AUTO-DETECTION (FIX 404 ERROR) ---
+# --- 1. MODEL AUTO-DETECTION ---
 def get_working_model(api_key):
-    # Try to fetch available models
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
-            # Filter models that support generateContent
             available = []
             for m in data.get('models', []):
                 if 'generateContent' in m.get('supportedGenerationMethods', []):
                     available.append(m['name'].replace('models/', ''))
             
-            # Priority Selection
-            if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
+            # Priority: Pro (Big Context) > Flash (Fast)
             if "gemini-1.5-pro" in available: return "gemini-1.5-pro"
-            if "gemini-1.0-pro" in available: return "gemini-1.0-pro"
+            if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
             if "gemini-pro" in available: return "gemini-pro"
-            
-            if available: return available[0] # Pick whatever is there
-            
-    except Exception as e:
-        print(f"Model fetch error: {e}")
-    
-    return "gemini-pro" # Fallback
+            if available: return available[0]
+    except Exception:
+        pass
+    return "gemini-pro"
 
-# --- 2. FILE PROCESSING (FIX GEOMETRY PDF) ---
+# --- 2. FILE PROCESSING ---
 def encode_image(image):
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-def process_files(uploaded_files, vision_mode=False):
+def process_files(uploaded_files, vision_mode=False, start_page=1, end_page=None):
     content_parts = []
     
     if not uploaded_files:
@@ -70,24 +64,27 @@ def process_files(uploaded_files, vision_mode=False):
             # --- PDF HANDLING ---
             if ext == 'pdf':
                 if vision_mode:
-                    # GEOMETRY FIX: Convert PDF to Images
-                    st.toast(f"🖼️ Converting PDF to Images: {file.name}...", icon="🔄")
+                    # Vision Mode: Converts PDF to Images (Best for Geometry/Diagrams)
+                    # Note: Processing 400 pages with Vision will timeout, so use Range!
+                    st.toast(f"📸 Scanning {file.name} (Pages {start_page}-{end_page})...", icon="⏳")
                     try:
-                        images = convert_from_bytes(file.read())
-                        # Limit pages to avoid timeout (First 5 pages)
-                        for img in images[:10]:
+                        images = convert_from_bytes(file.read(), first_page=start_page, last_page=end_page)
+                        
+                        # Warning for large batches
+                        if len(images) > 30:
+                            st.warning(f"⚠️ {file.name}: ඔබ පිටු {len(images)}ක් තෝරා ඇත. Vision Mode එකේදී මෙය ප්‍රමාද විය හැක.")
+                        
+                        for img in images:
                             content_parts.append({"type": "image", "data": encode_image(img)})
                     except Exception as e:
-                        st.error(f"Error converting PDF (Check packages.txt): {e}")
+                        st.error(f"PDF Error: {e}")
                 else:
-                    # Text Mode
+                    # Text Mode: Reads whole text (Fast, Good for Theory, No Diagrams)
+                    st.toast(f"📖 Reading Text from {file.name}...", icon="📄")
                     text = pdfminer.high_level.extract_text(file)
-                    if not text or len(text.strip()) < 50:
-                        st.warning(f"⚠️ {file.name} හි අකුරු නැත. 'Vision Mode' දමා නැවත උත්සාහ කරන්න.")
-                    else:
-                        content_parts.append({"type": "text", "data": text})
+                    content_parts.append({"type": "text", "data": text})
             
-            # --- IMAGE HANDLING ---
+            # --- IMAGES ---
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
                 content_parts.append({"type": "image", "data": encode_image(img)})
@@ -134,7 +131,7 @@ def call_gemini(api_key, model, prompt, content_parts):
     except Exception as e:
         return f"Connection Error: {e}"
 
-# --- 4. EXPORT (FONTS & DOWNLOADS) ---
+# --- 4. EXPORT ---
 def register_fonts(custom_path=None):
     path = custom_path if custom_path else "sinhala.ttf"
     if os.path.exists(path):
@@ -149,11 +146,9 @@ def create_pdf(text, font_path=None):
     c = canvas.Canvas(buffer, pagesize=A4)
     has_font = register_fonts(font_path)
     font_name = "Sinhala" if has_font else "Helvetica"
-    
     c.setFont(font_name, 11)
     y = 800
     margin = 40
-    
     for paragraph in text.split('\n'):
         clean_line = paragraph.replace("*", "").strip()
         if not clean_line: continue
@@ -193,7 +188,7 @@ def create_docx(text):
 
 # --- 5. UI ---
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.title("⚙️ Business Tools")
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("API Key Active")
@@ -201,61 +196,82 @@ with st.sidebar:
         api_key = st.text_input("Gemini API Key:", type="password")
         
     st.divider()
-    app_mode = st.radio("Mode:", ["Exam Paper Generator", "Document Digitizer"])
+    
+    # 🌍 LANGUAGE SELECTOR (New Feature)
+    language = st.radio("Paper Language (මාධ්‍යය):", ["Sinhala", "English"])
     
     st.divider()
-    # RESTORED FEATURE: Vision Mode
-    vision_mode = st.checkbox("🔮 Vision / Force OCR Mode", help="Use this for Scanned PDFs or Geometry papers.")
-    if vision_mode:
-        st.caption("✅ Geometry PDF සඳහා මෙය දාන්න.")
-        
+    
+    # 🔮 VISION MODE & RANGE
+    st.subheader("📚 Book Processing")
+    vision_mode = st.checkbox("🔮 Vision Mode (Diagrams/Scanned)", value=True, help="ජ්‍යාමිතිය වැනි පාඩම් සඳහා මෙය ON කරන්න.")
+    
+    st.caption("Page Range (Vision Mode සඳහා වඩාත් සුදුසුයි):")
+    c1, c2 = st.columns(2)
+    with c1: start_p = st.number_input("Start Page:", min_value=1, value=1)
+    with c2: end_p = st.number_input("End Page:", min_value=1, value=50)
+    
+    st.info("Tip: Vision Mode OFF කළොත් මුළු පොතම (Text Only) ඉක්මනින් කියවන්න පුළුවන්.")
+
     st.divider()
-    # RESTORED FEATURE: Custom Font
-    st.subheader("🅰️ Custom Font")
-    uploaded_font = st.file_uploader("Upload .ttf", type="ttf")
+    st.subheader("🅰️ Formatting")
+    uploaded_font = st.file_uploader("Custom Font (.ttf)", type="ttf")
     custom_font_path = None
     if uploaded_font:
         with open("custom.ttf", "wb") as f: f.write(uploaded_font.getbuffer())
         custom_font_path = "custom.ttf"
-        st.success("Font Loaded!")
 
-st.title(f"🧬 AI Doc Genie ({app_mode})")
+st.title(f"🎓 Exam Paper Biz ({language})")
 
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("1️⃣ Instructions")
-    user_instr = st.text_area("Instructions:", height=100)
-    ref_files = st.file_uploader("Reference Style", accept_multiple_files=True, key="ref")
-with col2:
-    st.subheader("2️⃣ Source Content")
-    src_files = st.file_uploader("Source Files", accept_multiple_files=True, key="src")
+    st.subheader("1️⃣ Requirements")
+    user_instr = st.text_area("Instructions:", height=150, placeholder="Ex: Create 5 hard essay questions from Geometry...")
+    ref_files = st.file_uploader("Reference Paper (Style Guide)", accept_multiple_files=True, key="ref")
 
-if st.button("Generate", type="primary"):
+with col2:
+    st.subheader("2️⃣ Textbooks / Notes")
+    src_files = st.file_uploader("Upload Textbooks (Grade 10/11)", accept_multiple_files=True, key="src")
+
+if st.button("Generate Paper", type="primary"):
     if not api_key or not src_files:
         st.error("Please provide API Key and Source Files.")
     else:
-        with st.spinner("Detecting AI Model & Processing..."):
-            # 1. Auto-Detect Model (Fix 404)
+        with st.spinner(f"Analyzing content in {language}..."):
+            # 1. Detect Model
             model = get_working_model(api_key)
             st.session_state.current_model = model
-            # st.toast(f"Using Model: {model}") # Uncomment to see which model is used
             
-            # 2. Process Files (Fix Geometry)
-            content_list = process_files(src_files, vision_mode=vision_mode)
+            # 2. Process Files
+            # If Vision Mode is ON, we use the Page Range.
+            # If OFF, we try to extract text from the whole file.
+            content_list = process_files(src_files, vision_mode=vision_mode, start_page=start_p, end_page=end_p)
+            
+            # Process Reference
+            ref_content = process_files(ref_files, vision_mode=False)
+            ref_text = ref_content[0]['data'] if ref_content and ref_content[0]['type'] == 'text' else "Standard Exam Format"
             
             if not content_list:
-                st.error("No valid content found. Try turning on Vision Mode.")
+                st.error("No content extracted. Please check your settings.")
             else:
-                # 3. Prompt Engineering (Sinhala/Math)
+                # 3. Prompt with Language
                 prompt = f"""
-                Role: Sri Lankan Assistant. Mode: {app_mode}.
-                Instructions: {user_instr}.
-                Reference Style: (User provided reference docs).
-                Task: Read the input images/text. Extract Geometry diagrams/text if present.
-                Rules:
-                1. Output ONLY the final document content.
-                2. Use Standard Unicode Sinhala.
-                3. Use Linear Math format (e.g. 3/5, x^2 + y^2 = r^2).
+                Role: Professional Exam Setter.
+                Target Audience: Sri Lankan O/L Students.
+                Output Language: {language}.
+                
+                Instructions: {user_instr}
+                Reference Style: {ref_text[:3000]}
+                
+                Task:
+                Create a high-quality exam paper based on the provided source content.
+                If the content contains diagrams (Geometry), analyze them and create relevant questions.
+                
+                Formatting Rules:
+                1. Use {language} language strictly.
+                2. If Sinhala: Use Unicode Sinhala.
+                3. Use Linear Math format (e.g. 3/5, x^2).
+                4. Output ONLY the final paper content.
                 """
                 
                 # 4. Generate
@@ -272,5 +288,5 @@ if st.session_state.generated_content:
     with c1:
         st.text_area("Preview", st.session_state.generated_content, height=600)
         b1, b2 = st.columns(2)
-        with b1: st.download_button("PDF", create_pdf(st.session_state.generated_content, custom_font_path), "doc.pdf", "application/pdf")
-        with b2: st.download_button("Word", create_docx(st.session_state.generated_content), "doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        with b1: st.download_button("Download PDF", create_pdf(st.session_state.generated_content, custom_font_path), f"Paper_{language}.pdf", "application/pdf")
+        with b2: st.download_button("Download Word", create_docx(st.session_state.generated_content), f"Paper_{language}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
