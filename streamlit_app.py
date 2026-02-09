@@ -64,22 +64,18 @@ def process_files(uploaded_files, vision_mode=False, start_page=1, end_page=None
             # --- PDF HANDLING ---
             if ext == 'pdf':
                 if vision_mode:
-                    # Vision Mode: Converts PDF to Images (Best for Geometry/Diagrams)
-                    # Note: Processing 400 pages with Vision will timeout, so use Range!
+                    # Vision Mode: Converts PDF to Images
                     st.toast(f"📸 Scanning {file.name} (Pages {start_page}-{end_page})...", icon="⏳")
                     try:
                         images = convert_from_bytes(file.read(), first_page=start_page, last_page=end_page)
-                        
-                        # Warning for large batches
                         if len(images) > 30:
-                            st.warning(f"⚠️ {file.name}: ඔබ පිටු {len(images)}ක් තෝරා ඇත. Vision Mode එකේදී මෙය ප්‍රමාද විය හැක.")
-                        
+                            st.warning(f"⚠️ {file.name}: පිටු {len(images)}ක් ඇත. මෙය තරමක් ප්‍රමාද විය හැක.")
                         for img in images:
                             content_parts.append({"type": "image", "data": encode_image(img)})
                     except Exception as e:
                         st.error(f"PDF Error: {e}")
                 else:
-                    # Text Mode: Reads whole text (Fast, Good for Theory, No Diagrams)
+                    # Text Mode
                     st.toast(f"📖 Reading Text from {file.name}...", icon="📄")
                     text = pdfminer.high_level.extract_text(file)
                     content_parts.append({"type": "text", "data": text})
@@ -175,6 +171,7 @@ def create_docx(text):
     for line in text.split('\n'):
         if not line.strip(): continue
         p = doc.add_paragraph()
+        # Fix: Ensure no legacy text gets bolded accidentally, keep standard
         if line.startswith("#") or "Paper" in line:
             run = p.add_run(line.replace("#", "").strip())
             run.bold = True
@@ -196,22 +193,15 @@ with st.sidebar:
         api_key = st.text_input("Gemini API Key:", type="password")
         
     st.divider()
-    
-    # 🌍 LANGUAGE SELECTOR (New Feature)
     language = st.radio("Paper Language (මාධ්‍යය):", ["Sinhala", "English"])
     
     st.divider()
-    
-    # 🔮 VISION MODE & RANGE
     st.subheader("📚 Book Processing")
-    vision_mode = st.checkbox("🔮 Vision Mode (Diagrams/Scanned)", value=True, help="ජ්‍යාමිතිය වැනි පාඩම් සඳහා මෙය ON කරන්න.")
+    vision_mode = st.checkbox("🔮 Vision Mode (Diagrams/Scanned)", value=True, help="ජ්‍යාමිතිය සඳහා ON කරන්න.")
     
-    st.caption("Page Range (Vision Mode සඳහා වඩාත් සුදුසුයි):")
     c1, c2 = st.columns(2)
     with c1: start_p = st.number_input("Start Page:", min_value=1, value=1)
     with c2: end_p = st.number_input("End Page:", min_value=1, value=50)
-    
-    st.info("Tip: Vision Mode OFF කළොත් මුළු පොතම (Text Only) ඉක්මනින් කියවන්න පුළුවන්.")
 
     st.divider()
     st.subheader("🅰️ Formatting")
@@ -226,8 +216,8 @@ st.title(f"🎓 Exam Paper Biz ({language})")
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("1️⃣ Requirements")
-    user_instr = st.text_area("Instructions:", height=150, placeholder="Ex: Create 5 hard essay questions from Geometry...")
-    ref_files = st.file_uploader("Reference Paper (Style Guide)", accept_multiple_files=True, key="ref")
+    user_instr = st.text_area("Instructions:", height=150, placeholder="Ex: Create 5 hard essay questions...")
+    ref_files = st.file_uploader("Reference Paper (Style)", accept_multiple_files=True, key="ref")
 
 with col2:
     st.subheader("2️⃣ Textbooks / Notes")
@@ -238,43 +228,37 @@ if st.button("Generate Paper", type="primary"):
         st.error("Please provide API Key and Source Files.")
     else:
         with st.spinner(f"Analyzing content in {language}..."):
-            # 1. Detect Model
             model = get_working_model(api_key)
             st.session_state.current_model = model
             
-            # 2. Process Files
-            # If Vision Mode is ON, we use the Page Range.
-            # If OFF, we try to extract text from the whole file.
             content_list = process_files(src_files, vision_mode=vision_mode, start_page=start_p, end_page=end_p)
             
-            # Process Reference
             ref_content = process_files(ref_files, vision_mode=False)
-            ref_text = ref_content[0]['data'] if ref_content and ref_content[0]['type'] == 'text' else "Standard Exam Format"
+            ref_text = ref_content[0]['data'] if ref_content and ref_content[0]['type'] == 'text' else ""
             
             if not content_list:
-                st.error("No content extracted. Please check your settings.")
+                st.error("No content extracted.")
             else:
-                # 3. Prompt with Language
+                # --- UPDATED PROMPT TO FIX GIBBERISH ---
                 prompt = f"""
                 Role: Professional Exam Setter.
                 Target Audience: Sri Lankan O/L Students.
                 Output Language: {language}.
                 
                 Instructions: {user_instr}
-                Reference Style: {ref_text[:3000]}
+                
+                IMPORTANT FORMATTING RULES:
+                1. OUTPUT MUST BE IN STANDARD UNICODE SINHALA (e.g. ප්‍රශ්නය, පිළිතුර).
+                2. DO NOT USE LEGACY FONTS or ASCII MAPPING (e.g. Do not output 'fYa%Ksh').
+                3. If the Reference text contains unreadable codes, IGNORE its style and use standard exam format.
+                4. Use Linear Math format (e.g. 3/5, x^2).
+                
+                Reference Content (For Structure Only): {ref_text[:1000]}...
                 
                 Task:
-                Create a high-quality exam paper based on the provided source content.
-                If the content contains diagrams (Geometry), analyze them and create relevant questions.
-                
-                Formatting Rules:
-                1. Use {language} language strictly.
-                2. If Sinhala: Use Unicode Sinhala.
-                3. Use Linear Math format (e.g. 3/5, x^2).
-                4. Output ONLY the final paper content.
+                Create a high-quality exam paper based on the source diagrams/text provided.
                 """
                 
-                # 4. Generate
                 res = call_gemini(api_key, model, prompt, content_list)
                 
                 if res.startswith("Error"): st.error(res)
