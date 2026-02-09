@@ -6,36 +6,53 @@ import pdfminer.high_level
 import docx2txt
 from PIL import Image
 from pdf2image import convert_from_bytes
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.pagesizes import A4
 import io
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
-# --- Page Config ---
-st.set_page_config(page_title="Exam Biz Pro (Hybrid)", page_icon="🎓", layout="wide")
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(page_title="Exam Biz Master", page_icon="💎", layout="wide")
 
-# --- Session State ---
+# --- 2. SESSION STATE MANAGEMENT ---
 if "generated_content" not in st.session_state:
     st.session_state.generated_content = ""
 if "typst_code" not in st.session_state:
     st.session_state.typst_code = ""
 
-# --- 1. MODEL AUTO-DETECTION ---
+# --- 3. INTELLIGENT MODEL SELECTOR (FIXES 404 ERROR) ---
 def get_working_model(api_key):
-    # Always try to use the best model for Coding + Text
-    return "gemini-1.5-pro"
+    """Checks which Gemini models are available for the key and picks the best one."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            # Filter models that support content generation
+            available = [
+                m['name'].replace('models/', '') 
+                for m in data.get('models', []) 
+                if 'generateContent' in m.get('supportedGenerationMethods', [])
+            ]
+            # Priority: Pro (Best for logic) > Flash (Fast) > Standard
+            if "gemini-1.5-pro" in available: return "gemini-1.5-pro"
+            if "gemini-1.5-flash" in available: return "gemini-1.5-flash"
+            if "gemini-1.0-pro" in available: return "gemini-1.0-pro"
+            if "gemini-pro" in available: return "gemini-pro"
+            if available: return available[0]
+    except Exception as e:
+        pass
+    return "gemini-pro" # Fallback
 
-# --- 2. API CALL FUNCTION ---
+# --- 4. API CALL HANDLER ---
 def call_gemini(api_key, model, prompt, content_parts):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
     parts = [{"text": prompt}]
     
+    # Add Images/Text to payload
     for item in content_parts:
         if item["type"] == "text":
             parts.append({"text": item["data"]})
@@ -49,7 +66,7 @@ def call_gemini(api_key, model, prompt, content_parts):
             
     data = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.3}
+        "generationConfig": {"temperature": 0.3} # Low temp for strict following of rules
     }
     
     try:
@@ -57,11 +74,11 @@ def call_gemini(api_key, model, prompt, content_parts):
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            return f"Error: {response.status_code} - {response.text}"
+            return f"Error ({model}): {response.status_code} - {response.text}"
     except Exception as e:
         return f"Connection Error: {e}"
 
-# --- 3. FILE PROCESSING (VISION & PAGE RANGE) ---
+# --- 5. FILE PROCESSING (VISION MODE + PAGE RANGE) ---
 def encode_image(image):
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
@@ -69,50 +86,48 @@ def encode_image(image):
 
 def process_files(uploaded_files, vision_mode=False, start_page=1, end_page=None):
     content_parts = []
-    
-    if not uploaded_files:
-        return content_parts
+    if not uploaded_files: return content_parts
         
     for file in uploaded_files:
         try:
             ext = file.name.split('.')[-1].lower()
             
-            # --- PDF HANDLING ---
+            # PDF Handling
             if ext == 'pdf':
                 if vision_mode:
-                    # Vision Mode: Converts PDF to Images
+                    # Extracts IMAGES from PDF (Best for Geometry/Diagrams)
                     st.toast(f"📸 Scanning {file.name} (Pages {start_page}-{end_page})...", icon="⏳")
                     try:
                         images = convert_from_bytes(file.read(), first_page=start_page, last_page=end_page)
                         for img in images:
                             content_parts.append({"type": "image", "data": encode_image(img)})
                     except Exception as e:
-                        st.error(f"PDF Error (Check packages.txt): {e}")
+                        st.error(f"PDF Vision Error: {e}. Ensure 'packages.txt' has poppler-utils.")
                 else:
-                    # Text Mode
+                    # Extracts TEXT from PDF (Fast, but no diagrams)
                     text = pdfminer.high_level.extract_text(file)
                     content_parts.append({"type": "text", "data": text})
             
-            # --- IMAGES ---
+            # Image Handling
             elif ext in ['png', 'jpg', 'jpeg']:
                 img = Image.open(file)
                 content_parts.append({"type": "image", "data": encode_image(img)})
             
-            # --- DOCS ---
+            # Word Doc Handling
             elif ext == 'docx':
                 text = docx2txt.process(file)
                 content_parts.append({"type": "text", "data": text})
                 
         except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
+            st.error(f"Error processing {file.name}: {e}")
             
     return content_parts
 
-# --- 4. ADVANCED WORD CREATOR (TABLES, DIAGRAMS, FORMATTING) ---
+# --- 6. ADVANCED WORD GENERATOR (TABLES, DIAGRAMS, SPACING) ---
 def create_docx(text):
     doc = Document()
     
-    # Set Font (Arial is safe for Sinhala Unicode)
+    # Style Config: Arial (Safe for Unicode Sinhala)
     style = doc.styles['Normal']
     style.font.name = 'Arial'
     style.font.size = Pt(11)
@@ -129,15 +144,16 @@ def create_docx(text):
         line = line.strip()
         if not line: continue
 
-        # --- Table Detection (Markdown to Word Table) ---
+        # --- TABLE DETECTOR (Markdown to Word) ---
         if "|" in line and len(line.split("|")) > 2:
             table_mode = True
             row_data = [cell.strip() for cell in line.split("|") if cell.strip()]
+            # Filter out divider lines (---|---)
             if "---" not in line:
                 table_data.append(row_data)
             continue
         
-        # --- End of Table ---
+        # --- TABLE BUILDER ---
         if table_mode and ("|" not in line):
             table_mode = False
             if table_data:
@@ -153,7 +169,7 @@ def create_docx(text):
                 except: pass
                 table_data = []
 
-        # --- Headings/Questions ---
+        # --- HEADINGS (Questions) ---
         if line.startswith("#") or "Paper" in line or "Part" in line:
             p = doc.add_paragraph()
             run = p.add_run(line.replace("#", "").strip())
@@ -161,7 +177,7 @@ def create_docx(text):
             run.font.size = Pt(12)
             p.paragraph_format.space_before = Pt(12)
         
-        # --- Diagram Placeholder (Blue Text) ---
+        # --- DIAGRAM PLACEHOLDER (The Blue Text Fix) ---
         elif "[DIAGRAM" in line or "[රූප සටහන" in line:
             p = doc.add_paragraph()
             run = p.add_run(line)
@@ -171,10 +187,10 @@ def create_docx(text):
             except: pass
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
-            # Leave space for drawing
+            # Add Blank Space for Drawing
             doc.add_paragraph().paragraph_format.space_after = Pt(72) # ~1 Inch space
 
-        # --- Normal Text ---
+        # --- NORMAL TEXT ---
         else:
             p = doc.add_paragraph(line)
             p.paragraph_format.space_after = Pt(6)
@@ -184,113 +200,113 @@ def create_docx(text):
     buffer.seek(0)
     return buffer
 
-# --- 5. UI LAYOUT ---
+# --- 7. UI LAYOUT (SIDEBAR) ---
 with st.sidebar:
     st.title("⚙️ Exam Biz Settings")
     
-    # API Key
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("API Key Active")
+        st.success("API Key Active ✅")
     else:
         api_key = st.text_input("Gemini API Key:", type="password")
         
     st.divider()
-    
-    # Language
-    language = st.radio("Paper Language (මාධ්‍යය):", ["Sinhala", "English"])
+    language = st.radio("Paper Language:", ["Sinhala", "English"])
     
     st.divider()
-    
-    # Vision & Page Range
     st.subheader("📚 Book Processing")
-    vision_mode = st.checkbox("🔮 Vision Mode (Diagrams/Scanned)", value=True, help="ජ්‍යාමිතිය සහ Scanned PDF සඳහා මෙය ON කරන්න.")
+    vision_mode = st.checkbox("🔮 Vision Mode", value=True, help="Must be ON for Geometry & Scanned Books")
     
-    st.caption("Page Range (Vision Mode සඳහා):")
+    st.caption("Page Range (To handle large books):")
     c1, c2 = st.columns(2)
     with c1: start_p = st.number_input("Start Page:", min_value=1, value=1)
     with c2: end_p = st.number_input("End Page:", min_value=1, value=50)
 
-# --- MAIN INTERFACE ---
-st.title(f"🎓 Hybrid Paper Generator ({language})")
+# --- 8. MAIN UI ---
+st.title(f"💎 Master Exam Generator ({language})")
 
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("1️⃣ Instructions & Structure")
-    user_instr = st.text_area("Instructions:", height=100, placeholder="Ex: Create 5 Essay Questions from Geometry...")
-    ref_files = st.file_uploader("Reference Paper (Structure)", accept_multiple_files=True, key="ref")
+    st.subheader("1️⃣ Instructions & Reference")
+    user_instr = st.text_area("Instructions:", height=100, placeholder="Ex: Create 5 Essay Questions matching the reference style...")
+    ref_files = st.file_uploader("Reference Paper (For Structure)", accept_multiple_files=True, key="ref")
 
 with col2:
-    st.subheader("2️⃣ Source Content")
-    src_files = st.file_uploader("Upload Textbooks (Grade 10/11)", accept_multiple_files=True, key="src")
+    st.subheader("2️⃣ Source Books")
+    src_files = st.file_uploader("Textbooks (Grade 10/11)", accept_multiple_files=True, key="src")
 
-# --- GENERATION LOGIC ---
+# --- 9. GENERATION LOGIC ---
 if st.button("Generate Paper + Typst Code", type="primary"):
     if not api_key or not src_files:
-        st.error("Please provide API Key and Source Files.")
+        st.error("⚠️ Missing Data: Please check API Key and Source Files.")
     else:
-        with st.spinner("Analyzing Content & Generating Code..."):
-            # 1. Get Model
+        with st.spinner("🚀 Analyzing Content, Structure & Generating Code..."):
+            
+            # A. Select Best Model
             model = get_working_model(api_key)
             
-            # 2. Process Files
+            # B. Extract Content
             content_list = process_files(src_files, vision_mode, start_p, end_p)
-            ref_content = process_files(ref_files, False)
+            ref_content = process_files(ref_files, False) # Text mode for Ref is fine usually
             ref_text = ref_content[0]['data'] if ref_content and ref_content[0]['type'] == 'text' else ""
 
             if not content_list:
-                st.error("No content found! Check Page Range or Vision Mode.")
+                st.error("No content extracted! Check Page Range or Vision Mode.")
             else:
-                # 3. STRICT HYBRID PROMPT
+                # C. THE ULTIMATE PROMPT
                 prompt = f"""
-                Role: Expert Exam Setter & Typst Coder.
+                Role: Expert Exam Setter & Technical Coder.
                 Language: {language}.
                 
-                --- TASK 1: EXAM PAPER TEXT (WORD DOC) ---
-                1. Create the exam paper based on User Instructions & Source Content.
-                2. **STRUCTURE:** Strictly follow the Reference Paper (Number of questions, Types).
+                --- TASK 1: WORD DOCUMENT CONTENT ---
+                1. Create an Exam Paper based on User Instructions & Source Content.
+                2. **STRUCTURE:** You MUST follow the Reference Paper's structure exactly (Number of questions, Question types).
                 3. **CRITICAL RULES:**
-                   - Use 100% Unicode Sinhala (e.g. "ශ්‍රේණිය", NOT "fYa%Ksh").
-                   - Check spelling strictly.
-                   - NO Legacy fonts.
-                4. **DIAGRAMS:** In the text, write ONLY a placeholder: 
+                   - Language: 100% Unicode Sinhala (if Sinhala selected). NO legacy/gibberish fonts.
+                   - Spelling: Strict check (e.g., "ත්‍රිකෝණය", "වර්ගඵලය").
+                   - Math: Linear format (e.g. 3/5, x^2).
+                4. **DIAGRAMS IN TEXT:** Do not draw. Write placeholder: 
                    "[DIAGRAM Q{{num}}: Description of diagram...]"
-                5. **TABLES:** Use Markdown tables (| Col 1 | Col 2 |).
+                5. **TABLES:** Use Markdown tables (| Col | Col |).
                 
-                --- TASK 2: TYPST CODE (FOR DIAGRAMS) ---
-                1. After the paper, add separator: "### TYPST START ###".
-                2. Write a VALID 'Typst' file using 'cetz' package to draw diagrams for Task 1.
+                --- TASK 2: TYPST CODE (VECTOR DIAGRAMS) ---
+                1. After the paper text, add separator: "### TYPST START ###".
+                2. Write a COMPLETE, VALID 'Typst' file using the 'cetz' package.
                 3. Header: `#import "@preview/cetz:0.2.2": canvas, draw`
-                4. Label each diagram using comments (e.g. `// Question 1`).
+                4. For every diagram mentioned in Task 1, write the code to draw it.
+                5. Use comments to label questions (e.g., `// Q1`).
                 
                 USER INSTRUCTIONS: {user_instr}
                 REFERENCE STRUCTURE: {ref_text[:2500]}
                 
-                Generate response now.
+                Generate now.
                 """
                 
-                # 4. Call API
+                # D. API Call
                 res = call_gemini(api_key, model, prompt, content_list)
                 
-                # 5. Split Output
+                # E. Split Output (Word Text / Typst Code)
                 if "### TYPST START ###" in res:
                     parts = res.split("### TYPST START ###")
                     st.session_state.generated_content = parts[0].strip()
                     st.session_state.typst_code = parts[1].strip()
                 else:
                     st.session_state.generated_content = res
-                    st.session_state.typst_code = "// No diagram code generated by AI"
+                    st.session_state.typst_code = "// No diagram code generated."
                 
                 st.rerun()
 
-# --- OUTPUT DISPLAY ---
+# --- 10. OUTPUT SECTION ---
 if st.session_state.generated_content:
     st.divider()
     c1, c2 = st.columns(2)
     
     with c1:
-        st.subheader("📄 Paper (Word)")
-        st.text_area("Preview Text", st.session_state.generated_content, height=400)
+        st.subheader("📄 Exam Paper (Word)")
+        st.caption("Contains Questions, Tables, and Diagram Placeholders.")
+        st.text_area("Preview", st.session_state.generated_content, height=400)
+        
+        # Word Download
         st.download_button(
             label="Download Word Doc (Official)",
             data=create_docx(st.session_state.generated_content),
@@ -299,12 +315,14 @@ if st.session_state.generated_content:
         )
 
     with c2:
-        st.subheader("📐 Diagrams (Typst)")
+        st.subheader("📐 Diagrams (Typst Code)")
+        st.caption("Upload this file to **typst.app** to get high-quality images.")
         st.code(st.session_state.typst_code, language="rust")
+        
+        # Typst Download
         st.download_button(
             label="Download Typst File",
             data=st.session_state.typst_code,
             file_name="diagrams.typ",
             mime="text/plain"
         )
-        st.info("Upload .typ file to **typst.app** to generate Vector Diagrams.")
