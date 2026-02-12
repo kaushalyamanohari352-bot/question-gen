@@ -145,7 +145,7 @@ def create_docx(text, doc_type="Paper"):
     buffer.seek(0)
     return buffer
 
-# --- 7. SIDEBAR & MODES ---
+# --- 7. SIDEBAR & MODES (මෙන්න මෙතන තියෙන්නේ) ---
 with st.sidebar:
     st.title("⚙️ Business Tools")
     if "GEMINI_API_KEY" in st.secrets: api_key = st.secrets["GEMINI_API_KEY"]
@@ -153,8 +153,9 @@ with st.sidebar:
     
     st.divider()
     
-    # --- MODE SELECTOR (THIS FIXES YOUR ISSUE) ---
+    # --- 👇 මෙන්න මේ කෑල්ල තමයි MODE SELECTOR එක ---
     app_mode = st.radio("Select Mode:", ["Exam Paper Generator", "Letters & Tutes (Business)"])
+    # -----------------------------------------------
     
     st.divider()
     language = st.radio("Language:", ["Sinhala", "English"])
@@ -166,7 +167,7 @@ with st.sidebar:
         with c1: start_p = st.number_input("Start Page", 1, value=1)
         with c2: end_p = st.number_input("End Page", 1, value=50)
     else:
-        vision_mode = False # Usually not needed for letters, but can enable if typing from image
+        vision_mode = False 
         start_p, end_p = 1, 5
 
 # --- 8. MAIN UI LOGIC ---
@@ -236,7 +237,7 @@ else:
         else:
             with st.spinner("Writing Document..."):
                 model = get_working_model(api_key)
-                content = process_files(src_files, False) # Vision off for speed usually
+                content = process_files(src_files, False)
                 
                 prompt = f"""
                 Role: Professional Secretary & Academic Writer.
